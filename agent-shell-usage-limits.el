@@ -25,19 +25,21 @@
 
 ;;; Commentary:
 
-;; Claude Code reports the usage limits of a Claude subscription (the
-;; 5-hour and 7-day windows that `/usage' shows) over ACP: each
-;; `usage_update' notification carries a `_claude/rateLimit' object in
-;; its `_meta'.  agent-shell 0.89 and later hand that `_meta' to the
-;; `usage-update' event of `agent-shell-subscribe-to'.
+;; Claude Code tells its front ends about the usage limits of a Claude
+;; subscription (the 5-hour and 7-day windows that `/usage' shows) with
+;; the Agent SDK's `rate_limit_event'.  claude-agent-acp 0.42 and later,
+;; the ACP adapter agent-shell runs Claude Code through, forward each of
+;; those as a `usage_update' notification whose `_meta' carries the
+;; event's data as `_claude/rateLimit'.  agent-shell 0.89 and later hand
+;; that `_meta' to the `usage-update' event of `agent-shell-subscribe-to'.
 ;;
 ;; This package subscribes to that event in Claude Code shells and shows
 ;; the windows in the mode line, for example
 ;;
 ;;   " 5h:10%[4:26] 7d:39%[4d/13h] "
 ;;
-;; Claude Code sends the object only when a value changes, so the last
-;; values received are kept and shown until the next change.
+;; The event only comes when a value changes, so the last values
+;; received are kept and shown until the next change.
 ;;
 ;; Setup:
 ;;

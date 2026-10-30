@@ -13,12 +13,14 @@ same numbers that =/usage= shows in the Claude Code CLI.
 
 * How it works
 
-Claude Code reports its usage limits over ACP: every =usage_update=
-notification carries a =_claude/rateLimit= object in its =_meta=.
-agent-shell 0.89 and later hand that =_meta= to subscribers of the
-=usage-update= event.  This package subscribes to the event in Claude Code
-shells, keeps the last values received (Claude Code only sends the object
-when a value changes) and shows them in the mode line.
+Claude Code tells its front ends about the account's usage limits with the
+Agent SDK's =rate_limit_event=.  claude-agent-acp, the ACP adapter that
+agent-shell runs Claude Code through, forwards each of those as a
+=usage_update= notification whose =_meta= carries the event's data as
+=_claude/rateLimit=.  agent-shell 0.89 and later hand that =_meta= to
+subscribers of the =usage-update= event.  This package subscribes to the
+event in Claude Code shells, keeps the last values received (the event
+only comes when a value changes) and shows them in the mode line.
 
 The values belong to the account, not to a session, so one set is shared by
 all shells.
@@ -27,6 +29,8 @@ all shells.
 
 - Emacs 29.1 or later
 - [[https://github.com/xenodium/agent-shell][agent-shell]] 0.89 or later
+- [[https://github.com/agentclientprotocol/claude-agent-acp][claude-agent-acp]] 0.42 or later, the adapter agent-shell uses for
+  Claude Code
 - Claude Code, logged in with a Claude subscription (Pro, Max, Team or
   Enterprise); API-key usage has no subscription windows
 - [[https://github.com/tumashu/posframe][posframe]], optional, for the details popover
@@ -83,7 +87,7 @@ terminal frames on Emacs 31), otherwise the echo area.
 
 The third line is the weekly window of the models a plan includes at a
 limited share (Claude Code calls it the Fable limit).  Claude Code only
-sends it with updates from sessions of that model, so the package keeps
+reports it from sessions of that model, so the package keeps
 each window separately: an update from an Opus session leaves the Fable
 line as it was, marked with the time it was received when it is older than
 the rest.
