@@ -11,6 +11,11 @@ That is the 5-hour window at 10 percent with 4 hours 26 minutes until it
 resets, and the 7-day window at 39 percent with 4 days 13 hours to go: the
 same numbers that =/usage= shows in the Claude Code CLI.
 
+Holding mouse-1 on the display shows the details, including the weekly
+window of the models a plan includes at a limited share:
+
+[[file:screenshots/popover.png]]
+
 * How it works
 
 Claude Code tells its front ends about the account's usage limits with the
