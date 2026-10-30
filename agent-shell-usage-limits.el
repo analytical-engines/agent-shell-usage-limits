@@ -1,0 +1,583 @@
+;;; agent-shell-usage-limits.el --- Show Claude Code usage limits in agent-shell  -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2026 Tomohiro Miyasaka
+
+;; Author: Tomohiro Miyasaka <tomohiro.miyasaka@analytical-engines.com>
+;; URL: https://github.com/analytical-engines/agent-shell-usage-limits
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "29.1") (agent-shell "0.89.0"))
+;; Keywords: tools, convenience
+
+;; This file is not part of GNU Emacs.
+
+;; This program is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+;;; Commentary:
+
+;; Claude Code reports the usage limits of a Claude subscription (the
+;; 5-hour and 7-day windows that `/usage' shows) over ACP: each
+;; `usage_update' notification carries a `_claude/rateLimit' object in
+;; its `_meta'.  agent-shell 0.89 and later hand that `_meta' to the
+;; `usage-update' event of `agent-shell-subscribe-to'.
+;;
+;; This package subscribes to that event in Claude Code shells and shows
+;; the windows in the mode line, for example
+;;
+;;   " 5h:10%[4:26] 7d:39%[4d/13h] "
+;;
+;; Claude Code sends the object only when a value changes, so the last
+;; values received are kept and shown until the next change.
+;;
+;; Setup:
+;;
+;;   (require 'agent-shell-usage-limits)
+;;   (agent-shell-usage-limits-mode 1)
+;;
+;; Details: `M-x agent-shell-usage-limits-describe' shows every window
+;; received, with reset times, in a posframe popover when posframe is
+;; installed and workable, otherwise in the echo area.  Holding mouse-1
+;; on the mode line display shows the same popover.
+;;
+;; Customization (`M-x customize-group RET agent-shell-usage-limits'):
+;;
+;;   `agent-shell-usage-limits-mode-line-windows'  windows to show
+;;   `agent-shell-usage-limits-format'             format of one window
+;;   `agent-shell-usage-limits-separator'          between windows
+;;   `agent-shell-usage-limits-mode-line-format'   around all windows
+;;   `agent-shell-usage-limits-window-labels'      window key -> label
+;;   `agent-shell-usage-limits-time-format-short'  time left, under a day
+;;   `agent-shell-usage-limits-time-format-long'   time left, a day or more
+;;   `agent-shell-usage-limits-reset-time-format'  reset time of day
+;;   `agent-shell-usage-limits-warning-threshold'  percent for `warning'
+;;   `agent-shell-usage-limits-error-threshold'    percent for `error'
+;;   `agent-shell-usage-limits-placement'          where to show
+;;   `agent-shell-usage-limits-agent-identifiers'  which shells to watch
+;;
+;; Using the values elsewhere:
+;;
+;;   (agent-shell-usage-limits-utilization 'five_hour)        => 7
+;;   (agent-shell-usage-limits-resets-at 'seven_day)          => 1793588400.0
+;;   (agent-shell-usage-limits-seconds-until-reset 'five_hour) => 12000.0
+;;
+;; All three return nil until a value has been received.  Functions on
+;; `agent-shell-usage-limits-update-functions' are called with the
+;; `_claude/rateLimit' alist each time a new one arrives, for example to
+;; warn when the 5-hour window passes 80 percent:
+;;
+;;   (add-hook 'agent-shell-usage-limits-update-functions
+;;             (lambda (_rate-limit)
+;;               (when (>= (or (agent-shell-usage-limits-utilization 'five_hour) 0) 80)
+;;                 (message "Claude Code: 5-hour window at %d%%"
+;;                          (agent-shell-usage-limits-utilization 'five_hour)))))
+;;
+;; Limitations:
+;;
+;; - The values belong to the account, so one set is kept for all shells.
+;;   Shells connected with different Claude accounts (agent configs that
+;;   set CLAUDE_CONFIG_DIR) overwrite each other's values.
+;; - Only Claude Code is supported.  Other agents do not report usage
+;;   limits over ACP yet.
+
+;;; Code:
+
+(require 'map)
+(require 'seq)
+(require 'subr-x)
+(require 'format-spec)
+
+(declare-function agent-shell-subscribe-to "agent-shell")
+(declare-function agent-shell-unsubscribe "agent-shell")
+(declare-function agent-shell-get-config "agent-shell")
+(defvar agent-shell-mode-hook)
+
+(defgroup agent-shell-usage-limits nil
+  "Show Claude Code usage limits in agent-shell mode lines."
+  :group 'agent-shell
+  :prefix "agent-shell-usage-limits-")
+
+;;;; Customization
+
+(defcustom agent-shell-usage-limits-agent-identifiers '(claude-code)
+  "Agent identifiers whose shells are watched.
+Each is the `:identifier' of an agent config (see
+`agent-shell-make-agent-config').  Nil watches every agent-shell buffer;
+updates without a `_claude/rateLimit' are ignored in any case."
+  :type '(choice (const :tag "Every agent" nil)
+                 (repeat symbol)))
+
+(defcustom agent-shell-usage-limits-window-labels
+  '((five_hour . "5h")
+    (seven_day . "7d")
+    (seven_day_overage_included . "Fable"))
+  "Window keys of `unifiedWindows' and the labels shown for them.
+The order is the order of `agent-shell-usage-limits-details'.  Windows
+not listed here are kept and shown under their key name.
+
+`seven_day_overage_included' is the weekly window of the models that a
+plan includes at a limited share (Claude Code calls it the Fable limit).
+Anthropic does not put the model name in the key, so if the model
+changes, only the label needs to change."
+  :type '(alist :key-type symbol :value-type string))
+
+(defcustom agent-shell-usage-limits-mode-line-windows '(five_hour seven_day)
+  "Window keys shown in the mode line, in this order.
+A window that has not been received yet is shown with \"-\" values.
+Add `seven_day_overage_included' to also show the Fable window."
+  :type '(repeat symbol))
+
+(defcustom agent-shell-usage-limits-format "%l:%u%%[%r]"
+  "Format of one window in the mode line, in `format-spec' syntax.
+%l  label (`agent-shell-usage-limits-window-labels')
+%k  window key, such as five_hour
+%u  utilization as a whole percent, without the percent sign
+%r  time left until the reset
+%t  time of the reset (`agent-shell-usage-limits-reset-time-format')
+%%  a percent sign
+Values not received yet are \"-\".  Width specs such as %3u work."
+  :type 'string)
+
+(defcustom agent-shell-usage-limits-separator " "
+  "String put between windows in the mode line."
+  :type 'string)
+
+(defcustom agent-shell-usage-limits-mode-line-format " %w "
+  "Format of the whole mode line display, in `format-spec' syntax.
+%w is the windows of `agent-shell-usage-limits-mode-line-windows', each
+rendered with `agent-shell-usage-limits-format' and joined with
+`agent-shell-usage-limits-separator'."
+  :type 'string)
+
+(defcustom agent-shell-usage-limits-time-format-short "%h:%02m"
+  "Format of the time left when it is under 24 hours (`format-spec').
+%h hours, %m minutes."
+  :type 'string)
+
+(defcustom agent-shell-usage-limits-time-format-long "%dd/%Hh"
+  "Format of the time left when it is 24 hours or more (`format-spec').
+%d days, %H hours within the day (0 to 23), %m minutes, %h total hours."
+  :type 'string)
+
+(defcustom agent-shell-usage-limits-reset-time-format '("%H:%M" . "%m/%d %H:%M")
+  "Formats of a reset time, in `format-time-string' syntax.
+The car is used when the reset is today, the cdr on any other day."
+  :type '(cons (string :tag "Today") (string :tag "Another day")))
+
+(defcustom agent-shell-usage-limits-warning-threshold 80
+  "Utilization in percent from which the display uses the `warning' face."
+  :type 'number)
+
+(defcustom agent-shell-usage-limits-error-threshold 95
+  "Utilization in percent from which the display uses the `error' face."
+  :type 'number)
+
+(defcustom agent-shell-usage-limits-placement 'misc-info
+  "Where `agent-shell-usage-limits-mode' puts the display.
+`misc-info' adds it to the buffer-local `mode-line-misc-info' of watched
+shells only, the way agent-shell adds its own mode line text, and leaves
+`mode-line-format' alone.  `front' puts it at the front of the default
+`mode-line-format', `misc' into `global-mode-string', and `none' leaves
+the placement to you: put (:eval (agent-shell-usage-limits-string))
+wherever you like.  Toggle the mode off and on to apply a change."
+  :type '(choice (const :tag "Watched shells only" misc-info)
+                 (const :tag "Front of the default mode line" front)
+                 (const :tag "global-mode-string" misc)
+                 (const :tag "Placed by hand" none)))
+
+(defvar agent-shell-usage-limits-update-functions nil
+  "Functions called each time a new rate limit arrives.
+Each is called with the `_claude/rateLimit' alist as its only argument.
+The accessors such as `agent-shell-usage-limits-utilization' already
+return the new values when they run.")
+
+;;;; Values received
+
+(defvar agent-shell-usage-limits-rate-limit nil
+  "The last `_claude/rateLimit' alist received from Claude Code.")
+
+(defvar agent-shell-usage-limits-updated-at nil
+  "When `agent-shell-usage-limits-rate-limit' was received, as `float-time'.")
+
+(defvar agent-shell-usage-limits-windows nil
+  "The last value received for each window.
+An alist of (KEY . (:window ALIST :received TIME)) where ALIST is the
+window's entry of `unifiedWindows' and TIME its `float-time' of arrival.
+A per-model window such as the Fable one arrives only with updates from
+that model's sessions, so windows are merged one by one instead of
+replacing the whole set; an update from another model keeps it.")
+
+(defun agent-shell-usage-limits--remember-windows (rate-limit time)
+  "Store each window of RATE-LIMIT's `unifiedWindows' as received at TIME."
+  (dolist (entry (map-elt rate-limit 'unifiedWindows))
+    (setf (alist-get (car entry) agent-shell-usage-limits-windows)
+          ;; Copy: agent-shell may reuse the containers it hands out.
+          (list :window (copy-tree (cdr entry)) :received time))))
+
+(defun agent-shell-usage-limits--window-key (window)
+  "Return the `unifiedWindows' key for WINDOW.
+WINDOW is a key such as `five_hour', or one of the aliases `five-hour'
+and `seven-day'."
+  (pcase window
+    ('five-hour 'five_hour)
+    ('seven-day 'seven_day)
+    (_ window)))
+
+(defun agent-shell-usage-limits--window (window)
+  "Return the alist last received for WINDOW, or nil if none yet."
+  (plist-get (alist-get (agent-shell-usage-limits--window-key window)
+                        agent-shell-usage-limits-windows)
+             :window))
+
+(defun agent-shell-usage-limits-window-received (window)
+  "Return when WINDOW was last received, as `float-time', or nil if never."
+  (plist-get (alist-get (agent-shell-usage-limits--window-key window)
+                        agent-shell-usage-limits-windows)
+             :received))
+
+(defun agent-shell-usage-limits-window-keys ()
+  "Return the keys of every window received so far, in display order.
+The order of `agent-shell-usage-limits-window-labels' first, then the
+windows not listed there, oldest first."
+  (let ((known (mapcar #'car agent-shell-usage-limits-window-labels))
+        (received (mapcar #'car agent-shell-usage-limits-windows)))
+    (append (seq-filter (lambda (key) (memq key received)) known)
+            (seq-remove (lambda (key) (memq key known)) (reverse received)))))
+
+(defun agent-shell-usage-limits-window-label (window)
+  "Return the label of WINDOW, or its key name when it has no label."
+  (let ((key (agent-shell-usage-limits--window-key window)))
+    (or (alist-get key agent-shell-usage-limits-window-labels)
+        (symbol-name key))))
+
+(defun agent-shell-usage-limits-utilization (window)
+  "Return the utilization of WINDOW as a whole percent, or nil if none yet.
+For example 7 for a utilization of 0.07."
+  (when-let* ((util (map-elt (agent-shell-usage-limits--window window) 'utilization)))
+    (round (* 100 util))))
+
+(defun agent-shell-usage-limits-resets-at (window)
+  "Return when WINDOW resets, as `float-time', or nil if none yet."
+  (let ((resets (map-elt (agent-shell-usage-limits--window window) 'resetsAt)))
+    (and (numberp resets) (float resets))))
+
+(defun agent-shell-usage-limits-seconds-until-reset (window)
+  "Return the seconds left until WINDOW resets, or nil if none yet.
+Zero once the reset time has passed."
+  (when-let* ((resets (agent-shell-usage-limits-resets-at window)))
+    (max 0 (- resets (float-time)))))
+
+;;;; Receiving from agent-shell
+
+(defvar-local agent-shell-usage-limits--subscription nil
+  "Token of this buffer's `usage-update' subscription, for unsubscribing.")
+
+(defun agent-shell-usage-limits--on-usage-update (event)
+  "Keep the `_claude/rateLimit' carried by the `usage-update' EVENT, if any."
+  (when-let* ((rate-limit (map-nested-elt event '(:data :meta _claude/rateLimit))))
+    (setq agent-shell-usage-limits-rate-limit rate-limit
+          agent-shell-usage-limits-updated-at (float-time))
+    (agent-shell-usage-limits--remember-windows rate-limit
+                                                agent-shell-usage-limits-updated-at)
+    (force-mode-line-update t)
+    (run-hook-with-args 'agent-shell-usage-limits-update-functions rate-limit)))
+
+(defun agent-shell-usage-limits--watched-buffer-p ()
+  "Return non-nil if the current buffer is a shell of a watched agent.
+See `agent-shell-usage-limits-agent-identifiers'."
+  (and (derived-mode-p 'agent-shell-mode)
+       (or (null agent-shell-usage-limits-agent-identifiers)
+           (not (fboundp 'agent-shell-get-config))
+           (memq (map-elt (agent-shell-get-config (current-buffer)) :identifier)
+                 agent-shell-usage-limits-agent-identifiers))))
+
+(defun agent-shell-usage-limits--subscribe ()
+  "Subscribe to `usage-update' in the current buffer if it is watched.
+Does nothing when already subscribed."
+  (when (and (agent-shell-usage-limits--watched-buffer-p)
+             (fboundp 'agent-shell-subscribe-to)
+             (null agent-shell-usage-limits--subscription))
+    (setq agent-shell-usage-limits--subscription
+          (agent-shell-subscribe-to
+           :shell-buffer (current-buffer)
+           :event 'usage-update
+           :on-event #'agent-shell-usage-limits--on-usage-update))))
+
+(defun agent-shell-usage-limits--unsubscribe ()
+  "Drop the current buffer's `usage-update' subscription, if any."
+  (when (and agent-shell-usage-limits--subscription
+             (fboundp 'agent-shell-unsubscribe))
+    (agent-shell-unsubscribe :subscription agent-shell-usage-limits--subscription)
+    (setq agent-shell-usage-limits--subscription nil)))
+
+;;;; Rendering
+
+(defun agent-shell-usage-limits--format-duration (seconds)
+  "Format SECONDS as time left, or \"-\" when SECONDS is nil.
+For example \"4:26\" for 15960, or \"4d/13h\" for 392400."
+  (if (null seconds)
+      "-"
+    (let* ((hours (floor seconds 3600))
+           (minutes (floor (mod seconds 3600) 60)))
+      (format-spec (if (>= hours 24)
+                       agent-shell-usage-limits-time-format-long
+                     agent-shell-usage-limits-time-format-short)
+                   `((?d . ,(number-to-string (/ hours 24)))
+                     (?H . ,(number-to-string (% hours 24)))
+                     (?h . ,(number-to-string hours))
+                     (?m . ,(number-to-string minutes)))))))
+
+(defun agent-shell-usage-limits--format-reset-time (time)
+  "Format the reset TIME, a `float-time', or \"-\" when TIME is nil.
+Uses the car of `agent-shell-usage-limits-reset-time-format' when TIME is
+today and the cdr otherwise."
+  (if (null time)
+      "-"
+    (format-time-string
+     (if (equal (format-time-string "%F" time) (format-time-string "%F"))
+         (car agent-shell-usage-limits-reset-time-format)
+       (cdr agent-shell-usage-limits-reset-time-format))
+     time)))
+
+(defun agent-shell-usage-limits--render-window (window placeholder)
+  "Render WINDOW with `agent-shell-usage-limits-format'.
+With PLACEHOLDER non-nil, put asterisks where the numbers would be."
+  (format-spec agent-shell-usage-limits-format
+               `((?l . ,(agent-shell-usage-limits-window-label window))
+                 (?k . ,(symbol-name (agent-shell-usage-limits--window-key window)))
+                 (?u . ,(cond (placeholder "**")
+                              ((agent-shell-usage-limits-utilization window)
+                               (number-to-string
+                                (agent-shell-usage-limits-utilization window)))
+                              (t "-")))
+                 (?r . ,(if placeholder
+                            (format-spec agent-shell-usage-limits-time-format-short
+                                         '((?d . "*") (?H . "*") (?h . "*") (?m . "**")))
+                          (agent-shell-usage-limits--format-duration
+                           (agent-shell-usage-limits-seconds-until-reset window))))
+                 (?t . ,(if placeholder
+                            "**:**"
+                          (agent-shell-usage-limits--format-reset-time
+                           (agent-shell-usage-limits-resets-at window)))))))
+
+(defun agent-shell-usage-limits--render (placeholder)
+  "Render the mode line text from the customized formats.
+With PLACEHOLDER non-nil, put asterisks where the numbers would be."
+  (format-spec agent-shell-usage-limits-mode-line-format
+               `((?w . ,(mapconcat (lambda (window)
+                                     (agent-shell-usage-limits--render-window window placeholder))
+                                   agent-shell-usage-limits-mode-line-windows
+                                   agent-shell-usage-limits-separator)))))
+
+(defun agent-shell-usage-limits--face ()
+  "Return the face for the mode line text, from the highest shown utilization.
+Nil below `agent-shell-usage-limits-warning-threshold', so the text takes
+the mode line's own colors."
+  (let ((worst (apply #'max 0
+                      (mapcar (lambda (window)
+                                (or (agent-shell-usage-limits-utilization window) 0))
+                              agent-shell-usage-limits-mode-line-windows))))
+    (cond ((>= worst agent-shell-usage-limits-error-threshold) 'error)
+          ((>= worst agent-shell-usage-limits-warning-threshold) 'warning)
+          (t nil))))
+
+(defun agent-shell-usage-limits-details ()
+  "Return a multi-line description of every window received so far.
+Each line has the label, utilization, reset time and time left.  A window
+older than the latest update by more than a minute gets its own time of
+arrival, and one whose reset time has passed says so."
+  (let ((keys (agent-shell-usage-limits-window-keys)))
+    (if (null keys)
+        "Claude Code usage limits: waiting for the first update"
+      (let* ((width (apply #'max
+                           (mapcar (lambda (key)
+                                     (string-width (agent-shell-usage-limits-window-label key)))
+                                   keys)))
+             (line
+              (lambda (key)
+                (let* ((util (agent-shell-usage-limits-utilization key))
+                       (left (agent-shell-usage-limits-seconds-until-reset key))
+                       (received (agent-shell-usage-limits-window-received key))
+                       (stale (and received agent-shell-usage-limits-updated-at
+                                   (> (- agent-shell-usage-limits-updated-at received) 60))))
+                  (concat
+                   (format "%s  %4s  resets %-12s %s"
+                           (string-pad (agent-shell-usage-limits-window-label key) width)
+                           (if util (format "%d%%" util) "-")
+                           (agent-shell-usage-limits--format-reset-time
+                            (agent-shell-usage-limits-resets-at key))
+                           (if (and left (zerop left))
+                               "(reset passed)"
+                             (format "(in %s)" (agent-shell-usage-limits--format-duration left))))
+                   (when stale
+                     (format "  as of %s" (format-time-string "%m/%d %H:%M" received))))))))
+        (concat (format "Claude Code usage limits (received %s)\n"
+                        (format-time-string "%H:%M:%S" agent-shell-usage-limits-updated-at))
+                (mapconcat line keys "\n"))))))
+
+;;;; Describing
+
+;; posframe is loaded only when `agent-shell-usage-limits-describe' runs.
+(declare-function posframe-show "posframe")
+(declare-function posframe-hide "posframe")
+(declare-function posframe-workable-p "posframe")
+(declare-function posframe-poshandler-window-bottom-right-corner "posframe")
+
+(defconst agent-shell-usage-limits--posframe-buffer " *agent-shell-usage-limits*"
+  "Buffer of the popover shown by `agent-shell-usage-limits-describe'.")
+
+(defun agent-shell-usage-limits--hide-posframe ()
+  "Hide the popover and remove this function from `pre-command-hook'."
+  (remove-hook 'pre-command-hook #'agent-shell-usage-limits--hide-posframe)
+  (when (fboundp 'posframe-hide)
+    (posframe-hide agent-shell-usage-limits--posframe-buffer)))
+
+(defun agent-shell-usage-limits--popover-p ()
+  "Return non-nil if a posframe popover works on the selected frame.
+That is any graphical frame, and a terminal frame on Emacs 31 or later."
+  (and (require 'posframe nil t)
+       (posframe-workable-p)))
+
+(defun agent-shell-usage-limits-describe (&optional event)
+  "Show the details of every usage limit window received so far.
+Shows a popover above the right end of the mode line when posframe is
+workable, otherwise the text in the echo area.  The popover closes at
+the next command.  When called from the mode line by mouse (EVENT
+non-nil), the popover goes to the clicked window and closes when the
+button is released."
+  (interactive (list (and (mouse-event-p last-input-event) last-input-event)))
+  (let ((text (agent-shell-usage-limits-details))
+        (window (or (and event (posn-window (event-start event)))
+                    (selected-window))))
+    (if (and (window-live-p window)
+             (with-selected-window window (agent-shell-usage-limits--popover-p)))
+        (with-selected-window window
+          (let ((graphic (display-graphic-p)))
+            (posframe-show agent-shell-usage-limits--posframe-buffer
+                           ;; Pad every line, and add blank lines above and
+                           ;; below, so the margins are even.
+                           :string (mapconcat (lambda (line) (concat "  " line "  "))
+                                              (append '("") (split-string text "\n") '(""))
+                                              "\n")
+                           :poshandler #'posframe-poshandler-window-bottom-right-corner
+                           ;; A thin border on graphical frames.  On a
+                           ;; terminal the border is drawn with characters
+                           ;; that get cut at the right edge and overlap
+                           ;; the mode line, so use a background instead.
+                           :internal-border-width (if graphic 1 0)
+                           :internal-border-color (face-foreground 'shadow nil t)
+                           :background-color (face-background (if graphic 'default 'highlight)
+                                                              nil t)
+                           :foreground-color (face-foreground 'default nil t)))
+          (add-hook 'pre-command-hook #'agent-shell-usage-limits--hide-posframe))
+      (message "%s" text))))
+
+;;;; Mode line
+
+(defvar agent-shell-usage-limits-mode-line-map
+  (let ((map (make-sparse-keymap)))
+    ;; Show the details while the button is held.  The release (mouse-1 or
+    ;; drag-mouse-1) runs `ignore', and `pre-command-hook' closes the
+    ;; popover before that command.
+    (define-key map [mode-line down-mouse-1] #'agent-shell-usage-limits-describe)
+    (define-key map [mode-line mouse-1] #'ignore)
+    (define-key map [mode-line drag-mouse-1] #'ignore)
+    map)
+  "Keymap of the usage limits text in the mode line.")
+
+(defun agent-shell-usage-limits-string ()
+  "Return the usage limits text for the mode line.
+Before the first update the numbers are asterisks in the `shadow' face."
+  (let* ((received (and agent-shell-usage-limits-windows t))
+         (text (agent-shell-usage-limits--render (not received))))
+    ;; A percent sign is special in the mode line.
+    (propertize (string-replace "%" "%%" text)
+                'face (if received (agent-shell-usage-limits--face) 'shadow)
+                ;; Where the popover works, the tooltip only explains the
+                ;; mouse, to avoid showing the details twice.
+                'help-echo (lambda (&rest _)
+                             (if (agent-shell-usage-limits--popover-p)
+                                 "mouse-1 (hold): show usage limit details"
+                               (agent-shell-usage-limits-details)))
+                'local-map agent-shell-usage-limits-mode-line-map
+                'mouse-face 'mode-line-highlight)))
+
+(defconst agent-shell-usage-limits--element '(:eval (agent-shell-usage-limits-string))
+  "The mode line construct that `agent-shell-usage-limits-mode' places.")
+
+(defun agent-shell-usage-limits--setup-misc-info ()
+  "Add the display to the buffer-local `mode-line-misc-info' of a watched shell."
+  (when (and (eq agent-shell-usage-limits-placement 'misc-info)
+             (agent-shell-usage-limits--watched-buffer-p)
+             (not (member agent-shell-usage-limits--element mode-line-misc-info)))
+    (setq-local mode-line-misc-info
+                (append mode-line-misc-info (list agent-shell-usage-limits--element)))))
+
+(defun agent-shell-usage-limits--enable ()
+  "Subscribe in watched shells and place the display."
+  ;; Shells opened from now on, and the ones already open.
+  (add-hook 'agent-shell-mode-hook #'agent-shell-usage-limits--subscribe)
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (agent-shell-usage-limits--subscribe)))
+  (pcase agent-shell-usage-limits-placement
+    ('none nil)
+    ('misc-info
+     (add-hook 'agent-shell-mode-hook #'agent-shell-usage-limits--setup-misc-info)
+     (dolist (buffer (buffer-list))
+       (with-current-buffer buffer
+         (agent-shell-usage-limits--setup-misc-info))))
+    ('front
+     (unless (member agent-shell-usage-limits--element (default-value 'mode-line-format))
+       (setq-default mode-line-format
+                     (cons agent-shell-usage-limits--element
+                           (default-value 'mode-line-format)))))
+    (_
+     (unless (member agent-shell-usage-limits--element global-mode-string)
+       (setq global-mode-string
+             (cons agent-shell-usage-limits--element
+                   (if (listp global-mode-string)
+                       global-mode-string
+                     (list global-mode-string)))))))
+  (force-mode-line-update t))
+
+(defun agent-shell-usage-limits--disable ()
+  "Unsubscribe everywhere and remove the display from every placement."
+  (remove-hook 'agent-shell-mode-hook #'agent-shell-usage-limits--subscribe)
+  (remove-hook 'agent-shell-mode-hook #'agent-shell-usage-limits--setup-misc-info)
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (agent-shell-usage-limits--unsubscribe)
+      (when (and (local-variable-p 'mode-line-misc-info)
+                 (member agent-shell-usage-limits--element mode-line-misc-info))
+        (setq-local mode-line-misc-info
+                    (delete agent-shell-usage-limits--element mode-line-misc-info)))))
+  (setq-default mode-line-format
+                (delete agent-shell-usage-limits--element (default-value 'mode-line-format)))
+  (setq global-mode-string
+        (delete agent-shell-usage-limits--element global-mode-string))
+  (force-mode-line-update t))
+
+;;;###autoload
+(define-minor-mode agent-shell-usage-limits-mode
+  "Show Claude Code usage limits in agent-shell mode lines.
+Subscribes to the `usage-update' event in the shells of the agents in
+`agent-shell-usage-limits-agent-identifiers' and places the display as
+`agent-shell-usage-limits-placement' says."
+  :global t
+  :group 'agent-shell-usage-limits
+  (if agent-shell-usage-limits-mode
+      (agent-shell-usage-limits--enable)
+    (agent-shell-usage-limits--disable)))
+
+(provide 'agent-shell-usage-limits)
+;;; agent-shell-usage-limits.el ends here

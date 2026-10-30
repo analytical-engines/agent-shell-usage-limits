@@ -1,0 +1,162 @@
+#+title: agent-shell-usage-limits
+
+Show the usage limits of your Claude subscription in the mode line of
+[[https://github.com/xenodium/agent-shell][agent-shell]] buffers running Claude Code.
+
+#+begin_example
+ 5h:10%[4:26] 7d:39%[4d/13h]
+#+end_example
+
+That is the 5-hour window at 10 percent with 4 hours 26 minutes until it
+resets, and the 7-day window at 39 percent with 4 days 13 hours to go: the
+same numbers that =/usage= shows in the Claude Code CLI.
+
+* How it works
+
+Claude Code reports its usage limits over ACP: every =usage_update=
+notification carries a =_claude/rateLimit= object in its =_meta=.
+agent-shell 0.89 and later hand that =_meta= to subscribers of the
+=usage-update= event.  This package subscribes to the event in Claude Code
+shells, keeps the last values received (Claude Code only sends the object
+when a value changes) and shows them in the mode line.
+
+The values belong to the account, not to a session, so one set is shared by
+all shells.
+
+* Requirements
+
+- Emacs 29.1 or later
+- [[https://github.com/xenodium/agent-shell][agent-shell]] 0.89 or later
+- Claude Code, logged in with a Claude subscription (Pro, Max, Team or
+  Enterprise); API-key usage has no subscription windows
+- [[https://github.com/tumashu/posframe][posframe]], optional, for the details popover
+
+* Install
+
+Not on MELPA yet.  With =package-vc-install= (Emacs 29):
+
+#+begin_src emacs-lisp
+(package-vc-install "https://github.com/analytical-engines/agent-shell-usage-limits")
+#+end_src
+
+With straight.el:
+
+#+begin_src emacs-lisp
+(straight-use-package
+ '(agent-shell-usage-limits :type git :host github
+                            :repo "analytical-engines/agent-shell-usage-limits"))
+#+end_src
+
+Or put =agent-shell-usage-limits.el= somewhere on your =load-path=.
+
+* Setup
+
+#+begin_src emacs-lisp
+(require 'agent-shell-usage-limits)
+(agent-shell-usage-limits-mode 1)
+#+end_src
+
+By default the display is added to the buffer-local =mode-line-misc-info=
+of Claude Code shells, the same way agent-shell adds its own mode line
+text, so your =mode-line-format= is left alone.  See
+=agent-shell-usage-limits-placement= for the other placements, including
+placing =(:eval (agent-shell-usage-limits-string))= by hand.
+
+Until the first update arrives the numbers are shown as asterisks.  Claude
+Code sends the first one after the first prompt of a session.
+
+* Details
+
+=M-x agent-shell-usage-limits-describe= shows every window received so
+far, with reset times:
+
+#+begin_example
+Claude Code usage limits (received 11:20:35)
+5h      7%  resets 16:00        (in 4:39)
+7d     40%  resets 11/02 14:00  (in 2d/23h)
+Fable  61%  resets 11/02 14:00  (in 2d/23h)
+#+end_example
+
+The same popover appears while mouse-1 is held on the mode line display.
+It uses posframe when installed and workable (graphical frames, and
+terminal frames on Emacs 31), otherwise the echo area.
+
+The third line is the weekly window of the models a plan includes at a
+limited share (Claude Code calls it the Fable limit).  Claude Code only
+sends it with updates from sessions of that model, so the package keeps
+each window separately: an update from an Opus session leaves the Fable
+line as it was, marked with the time it was received when it is older than
+the rest.
+
+* Format
+
+The mode line text is built from three customizable pieces:
+
+| Variable                                     | Default        | Meaning                       |
+|----------------------------------------------+----------------+-------------------------------|
+| =agent-shell-usage-limits-mode-line-windows= | =(five_hour seven_day)= | windows shown, in order |
+| =agent-shell-usage-limits-format=            | ="%l:%u%%[%r]"= | one window                   |
+| =agent-shell-usage-limits-separator=         | =" "=          | between windows               |
+| =agent-shell-usage-limits-mode-line-format=  | =" %w "=       | around the whole thing        |
+
+In =agent-shell-usage-limits-format=, =%l= is the window's label, =%u= its
+utilization as a whole percent, =%r= the time left until the reset, =%t=
+the time of the reset and =%k= the window's key.  Width specs such as =%3u=
+work.
+
+To show the Fable window as well:
+
+#+begin_src emacs-lisp
+(setq agent-shell-usage-limits-mode-line-windows
+      '(five_hour seven_day seven_day_overage_included))
+#+end_src
+
+The labels come from =agent-shell-usage-limits-window-labels=.  The text
+takes the =warning= face from 80 percent and the =error= face from 95
+percent of the highest window shown; see
+=agent-shell-usage-limits-warning-threshold= and
+=agent-shell-usage-limits-error-threshold=.
+
+* Using the values elsewhere
+
+The values are available to your own code:
+
+#+begin_src emacs-lisp
+(agent-shell-usage-limits-utilization 'five_hour)         ; => 7, or nil before the first update
+(agent-shell-usage-limits-resets-at 'seven_day)           ; => 1793588400.0 (float-time)
+(agent-shell-usage-limits-seconds-until-reset 'five_hour) ; => 12000.0
+(agent-shell-usage-limits-window-keys)                    ; => (five_hour seven_day seven_day_overage_included)
+#+end_src
+
+=agent-shell-usage-limits-update-functions= is a hook run with the
+=_claude/rateLimit= alist each time a new one arrives.  For example, to be
+told when the 5-hour window passes 80 percent:
+
+#+begin_src emacs-lisp
+(add-hook 'agent-shell-usage-limits-update-functions
+          (lambda (_rate-limit)
+            (when (>= (or (agent-shell-usage-limits-utilization 'five_hour) 0) 80)
+              (message "Claude Code: 5-hour window at %d%%"
+                       (agent-shell-usage-limits-utilization 'five_hour)))))
+#+end_src
+
+* Supported agents
+
+Claude Code only.  Other agents do not report their usage limits over ACP
+yet; codex-acp, for instance, keeps Codex's windows for its =/status=
+command but does not put them in =_meta=
+([[https://github.com/agentclientprotocol/codex-acp/issues/227][agentclientprotocol/codex-acp#227]]).
+When one does, support means reading its =_meta= in
+=agent-shell-usage-limits--on-usage-update= and listing its agent
+identifier in =agent-shell-usage-limits-agent-identifiers=; pull requests
+are welcome.
+
+* Limitations
+
+- One set of values for all shells.  Shells connected with different
+  Claude accounts (agent configs that set =CLAUDE_CONFIG_DIR=) overwrite
+  each other's values.  Keeping values per account is planned.
+
+* License
+
+GPL-3.0-or-later.  See [[file:LICENSE][LICENSE]].
