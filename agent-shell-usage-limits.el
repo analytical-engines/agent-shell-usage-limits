@@ -33,8 +33,8 @@
 ;; event's data as `_claude/rateLimit'.  agent-shell 0.89 and later hand
 ;; that `_meta' to the `usage-update' event of `agent-shell-subscribe-to'.
 ;;
-;; This package subscribes to that event in Claude Code shells and shows
-;; the windows in the mode line, for example
+;; This package subscribes to that event in agent-shell buffers connected
+;; to Claude Code and shows the windows in the mode line, for example
 ;;
 ;;   " 5h:10%[4:26] 7d:39%[4d/13h] "
 ;;

@@ -19,8 +19,9 @@ agent-shell runs Claude Code through, forwards each of those as a
 =usage_update= notification whose =_meta= carries the event's data as
 =_claude/rateLimit=.  agent-shell 0.89 and later hand that =_meta= to
 subscribers of the =usage-update= event.  This package subscribes to the
-event in Claude Code shells, keeps the last values received (the event
-only comes when a value changes) and shows them in the mode line.
+event in agent-shell buffers connected to Claude Code, keeps the last
+values received (the event only comes when a value changes) and shows them
+in the mode line.
 
 The values belong to the account, not to a session, so one set is shared by
 all shells.
@@ -61,8 +62,8 @@ Or put =agent-shell-usage-limits.el= somewhere on your =load-path=.
 #+end_src
 
 By default the display is added to the buffer-local =mode-line-misc-info=
-of Claude Code shells, the same way agent-shell adds its own mode line
-text, so your =mode-line-format= is left alone.  See
+of those buffers, the same way agent-shell adds its own mode line text, so
+your =mode-line-format= is left alone.  See
 =agent-shell-usage-limits-placement= for the other placements, including
 placing =(:eval (agent-shell-usage-limits-string))= by hand.
 
