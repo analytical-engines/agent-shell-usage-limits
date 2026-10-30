@@ -167,6 +167,16 @@ are welcome.
   Claude accounts (agent configs that set =CLAUDE_CONFIG_DIR=) overwrite
   each other's values.  Keeping values per account is planned.
 
+* Acknowledgements
+
+- [[https://github.com/xenodium][Alvaro Ramirez]] for agent-shell, and for adding the =usage-update=
+  event with the agent's =_meta= to its public API when asked, which is
+  what made this package possible without touching agent-shell's
+  internals.
+- The maintainers of [[https://github.com/agentclientprotocol/claude-agent-acp][claude-agent-acp]] for forwarding Claude Code's rate
+  limit events over ACP as =_claude/rateLimit=.
+- [[https://github.com/tumashu][Feng Shu]] for posframe, which draws the details popover.
+
 * License
 
 GPL-3.0-or-later.  See [[file:LICENSE][LICENSE]].
