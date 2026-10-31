@@ -170,11 +170,15 @@ are welcome.
 
 The values belong to a Claude account, and the package keeps one set per
 account.  A shell's account is the Claude Code config directory its agent
-runs with: =CLAUDE_CONFIG_DIR=, or =~/.claude= when it is not set.  Each
-shell's mode line shows the values of its own account, and the details
-list one section per account, the current shell's first:
+runs with: =CLAUDE_CONFIG_DIR=, or =~/.claude= when it is not set.  A
+shell's mode line and details show its own account only; the details end
+with a count of the other accounts.
 
-[[file:screenshots/accounts.png]]
+=M-x agent-shell-usage-limits-list= shows every account in a table, one
+row each, with a column per window, the time of the last update and the
+account's open shells.  The table refreshes as updates arrive, =g=
+refreshes it by hand and =RET= switches to a shell of the account on the
+line.
 
 Accounts are labelled with their directory.  To label them yourself:
 
@@ -217,7 +221,7 @@ CLAUDE_CONFIG_DIR=~/.claude-work claude auth login
 #+end_example
 
 Status: tested with two config directories logged into one account, which
-showed up as two accounts with their own values and sections.  Shells of
+showed up as two accounts with their own values and rows.  Shells of
 two different accounts, with different values, have not been tried yet;
 reports are welcome.
 

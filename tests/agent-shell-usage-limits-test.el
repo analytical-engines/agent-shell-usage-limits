@@ -391,8 +391,8 @@ WINDOWS is an alist of (KEY . ((utilization . U) (resetsAt . T)))."
         (should (equal '("OTHER=1") agent-shell-anthropic-claude-environment))))
     (should-error (agent-shell-usage-limits-make-claude-code-config :name "x"))))
 
-(ert-deftest agent-shell-usage-limits-test-details-one-section-per-account ()
-  "With two accounts, details have a titled section for each."
+(ert-deftest agent-shell-usage-limits-test-details-show-one-account ()
+  "With two accounts, details show one, named, and count the others."
   (agent-shell-usage-limits-test--with-defaults
     (agent-shell-usage-limits--on-usage-update
      (agent-shell-usage-limits-test--event
@@ -402,23 +402,56 @@ WINDOWS is an alist of (KEY . ((utilization . U) (resetsAt . T)))."
      (agent-shell-usage-limits-test--event
       `((five_hour . ,(agent-shell-usage-limits-test--window 0.7 100))))
      "/home/me/.claude")
-    (let ((sections (split-string (agent-shell-usage-limits-details) "\n\n")))
-      (should (= 2 (length sections)))
+    ;; Outside a shell: the account last updated.
+    (let ((lines (split-string (agent-shell-usage-limits-details) "\n")))
+      (should (= 3 (length lines)))
       (should (string-prefix-p "Claude Code usage limits: /home/me/.claude (received "
-                               (nth 0 sections)))
-      (should (string-match-p "^5h +70%" (nth 0 sections)))
-      (should (string-prefix-p "Claude Code usage limits: /home/me/.claude-work (received "
-                               (nth 1 sections)))
-      (should (string-match-p "^5h +10%" (nth 1 sections))))
-    ;; In a shell of one of the accounts, its section comes first, marked.
+                               (nth 0 lines)))
+      (should (string-match-p "^5h +70%" (nth 1 lines)))
+      (should (equal "1 other account: M-x agent-shell-usage-limits-list" (nth 2 lines))))
+    ;; In a shell of the other account: that one.
     (cl-letf (((symbol-function 'agent-shell-usage-limits--display-account)
                (lambda () "/home/me/.claude-work")))
-      (let ((sections (split-string (agent-shell-usage-limits-details) "\n\n")))
-        (should (string-prefix-p
-                 "Claude Code usage limits: /home/me/.claude-work (this shell) (received "
-                 (nth 0 sections)))
-        (should (string-prefix-p "Claude Code usage limits: /home/me/.claude (received "
-                                 (nth 1 sections)))))))
+      (let ((lines (split-string (agent-shell-usage-limits-details) "\n")))
+        (should (string-prefix-p "Claude Code usage limits: /home/me/.claude-work (received "
+                                 (nth 0 lines)))
+        (should (string-match-p "^5h +10%" (nth 1 lines)))))
+    ;; Asked for explicitly.
+    (should (string-match-p "^5h +10%"
+                            (nth 1 (split-string
+                                    (agent-shell-usage-limits-details "/home/me/.claude-work")
+                                    "\n"))))))
+
+(ert-deftest agent-shell-usage-limits-test-list-one-row-per-account ()
+  "The list buffer has a row per account with a cell per window received."
+  (agent-shell-usage-limits-test--with-defaults
+    (agent-shell-usage-limits--on-usage-update
+     (agent-shell-usage-limits-test--event
+      `((five_hour . ,(agent-shell-usage-limits-test--window 0.1 (+ 3600 30)))
+        (seven_day_overage_included . ,(agent-shell-usage-limits-test--window 0.96 100))))
+     "/home/me/.claude-work")
+    (agent-shell-usage-limits--on-usage-update
+     (agent-shell-usage-limits-test--event
+      `((five_hour . ,(agent-shell-usage-limits-test--window 0.85 -1))
+        (seven_day . ,(agent-shell-usage-limits-test--window 0.4 100))))
+     "/home/me/.claude")
+    (with-temp-buffer
+      (agent-shell-usage-limits-list-mode)
+      (revert-buffer)
+      (should (equal '("Account" "5h" "7d" "Fable" "Received" "Shells")
+                     (mapcar #'car (append tabulated-list-format nil))))
+      (should (equal '("/home/me/.claude" "/home/me/.claude-work")
+                     (mapcar #'car tabulated-list-entries)))
+      (let ((home (cadr (assoc "/home/me/.claude" tabulated-list-entries)))
+            (work (cadr (assoc "/home/me/.claude-work" tabulated-list-entries))))
+        (should (equal "85% reset passed" (substring-no-properties (aref home 1))))
+        (should (eq 'warning (get-text-property 0 'face (aref home 1))))
+        (should (string-prefix-p "40% in " (aref home 2)))
+        (should (equal "-" (aref home 3)))
+        (should (equal "10% in 1:00" (substring-no-properties (aref work 1))))
+        (should (equal "-" (aref work 2)))
+        (should (eq 'error (get-text-property 0 'face (aref work 3)))))
+      (should (string-match-p "/home/me/.claude-work" (buffer-string))))))
 
 (provide 'agent-shell-usage-limits-test)
 ;;; agent-shell-usage-limits-test.el ends here
