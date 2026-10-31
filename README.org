@@ -210,17 +210,15 @@ with emacs-direnv, which switches the global environment by selected
 buffer, starting it from another project's buffer or from a sidebar gives
 the agent the wrong environment.
 
-Either way, Claude Code must be logged in for each config directory.  On
-macOS the login is kept in the Keychain, one entry per directory, so even a
-directory that is a symbolic link to =~/.claude= needs its own login:
+Either way, Claude Code must be logged in once for each config directory:
 
 #+begin_example
 CLAUDE_CONFIG_DIR=~/.claude-work claude auth login
 #+end_example
 
-Status: tested with two config directories of one account, which showed
-up as two accounts with their own values and sections.  Shells of two
-different accounts, with different values, have not been tried yet;
+Status: tested with two config directories logged into one account, which
+showed up as two accounts with their own values and sections.  Shells of
+two different accounts, with different values, have not been tried yet;
 reports are welcome.
 
 * Limitations
