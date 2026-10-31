@@ -30,6 +30,9 @@
   `(let ((agent-shell-usage-limits-rate-limit nil)
          (agent-shell-usage-limits-updated-at nil)
          (agent-shell-usage-limits-windows nil)
+         (agent-shell-usage-limits-accounts nil)
+         (agent-shell-usage-limits--bound-account nil)
+         (agent-shell-usage-limits-account-labels nil)
          (agent-shell-usage-limits-update-functions nil)
          (agent-shell-usage-limits-window-labels
           '((five_hour . "5h") (seven_day . "7d") (seven_day_overage_included . "Fable")))
@@ -227,6 +230,142 @@ WINDOWS is an alist of (KEY . ((utilization . U) (resetsAt . T)))."
       (should (string-prefix-p "Fable   61%  resets " (nth 3 lines)))
       (should (string-match-p "  as of [0-9/]+ [0-9:]+$" (nth 3 lines)))
       (should-not (string-match-p "as of" (nth 1 lines))))))
+
+;;;; Several accounts
+
+(ert-deftest agent-shell-usage-limits-test-account-from-environment ()
+  "The account is CLAUDE_CONFIG_DIR as given, or ~/.claude without it."
+  (let ((process-environment (cons "CLAUDE_CONFIG_DIR" process-environment)))
+    (should (equal (expand-file-name "~/.claude")
+                   (agent-shell-usage-limits--account-from-environment nil)))
+    (should (equal (expand-file-name "~/.claude")
+                   (agent-shell-usage-limits--account-from-environment
+                    '("CLAUDE_CONFIG_DIR=")))))
+  (should (equal (expand-file-name "~/.claude-work")
+                 (agent-shell-usage-limits--account-from-environment
+                  '("CLAUDE_CONFIG_DIR=~/.claude-work/"))))
+  ;; The client's variables come before Emacs's own, as acp.el starts it.
+  (let ((process-environment (cons "CLAUDE_CONFIG_DIR=/tmp/emacs-wide" process-environment)))
+    (should (equal "/tmp/emacs-wide"
+                   (agent-shell-usage-limits--account-from-environment nil)))
+    (should (equal "/tmp/per-client"
+                   (agent-shell-usage-limits--account-from-environment
+                    '("CLAUDE_CONFIG_DIR=/tmp/per-client"))))))
+
+(ert-deftest agent-shell-usage-limits-test-account-symlink-is-another-account ()
+  "A directory linking to another one is a separate account."
+  (let* ((dir (make-temp-file "asul-test" t))
+         (real (expand-file-name "real" dir))
+         (link (expand-file-name "link" dir)))
+    (unwind-protect
+        (progn
+          (make-directory real)
+          (make-symbolic-link real link)
+          (should-not (equal (agent-shell-usage-limits--account-from-environment
+                              (list (concat "CLAUDE_CONFIG_DIR=" real)))
+                             (agent-shell-usage-limits--account-from-environment
+                              (list (concat "CLAUDE_CONFIG_DIR=" link))))))
+      (delete-directory dir t))))
+
+(ert-deftest agent-shell-usage-limits-test-accounts-are-kept-apart ()
+  "Values of two accounts are stored and read separately."
+  (agent-shell-usage-limits-test--with-defaults
+    (agent-shell-usage-limits--on-usage-update
+     (agent-shell-usage-limits-test--event
+      `((five_hour . ,(agent-shell-usage-limits-test--window 0.1 100))
+        (seven_day_overage_included . ,(agent-shell-usage-limits-test--window 0.6 1000))))
+     "/home/me/.claude")
+    (agent-shell-usage-limits--on-usage-update
+     (agent-shell-usage-limits-test--event
+      `((five_hour . ,(agent-shell-usage-limits-test--window 0.7 100))))
+     "/home/me/.claude-work")
+    (should (equal '("/home/me/.claude" "/home/me/.claude-work")
+                   (agent-shell-usage-limits-account-list)))
+    (should (= 10 (agent-shell-usage-limits-utilization 'five_hour "/home/me/.claude")))
+    (should (= 70 (agent-shell-usage-limits-utilization 'five_hour "/home/me/.claude-work")))
+    (should (= 60 (agent-shell-usage-limits-utilization
+                   'seven_day_overage_included "/home/me/.claude")))
+    (should (null (agent-shell-usage-limits-utilization
+                   'seven_day_overage_included "/home/me/.claude-work")))
+    (should (equal '(five_hour) (agent-shell-usage-limits-window-keys "/home/me/.claude-work")))
+    ;; Outside a shell, the account last updated.
+    (should (= 70 (agent-shell-usage-limits-utilization 'five_hour)))
+    (should (null (agent-shell-usage-limits-utilization 'five_hour "/home/me/.claude-none")))))
+
+(ert-deftest agent-shell-usage-limits-test-explicit-account-wins-inside-another ()
+  "Inside one account's values, accessors keep it or take the one asked for."
+  (agent-shell-usage-limits-test--with-defaults
+    (agent-shell-usage-limits--on-usage-update
+     (agent-shell-usage-limits-test--event
+      `((five_hour . ,(agent-shell-usage-limits-test--window 0.1 100))))
+     "/a")
+    (agent-shell-usage-limits--on-usage-update
+     (agent-shell-usage-limits-test--event
+      `((five_hour . ,(agent-shell-usage-limits-test--window 0.2 100))))
+     "/b")
+    (agent-shell-usage-limits--with-account "/a"
+      (should (= 10 (agent-shell-usage-limits-utilization 'five_hour)))
+      (should (= 20 (agent-shell-usage-limits-utilization 'five_hour "/b")))
+      (should (= 10 (agent-shell-usage-limits-utilization 'five_hour))))))
+
+(ert-deftest agent-shell-usage-limits-test-hook-sees-its-account ()
+  "Update functions read the values of the account that was updated."
+  (agent-shell-usage-limits-test--with-defaults
+    (let (seen)
+      (agent-shell-usage-limits--on-usage-update
+       (agent-shell-usage-limits-test--event
+        `((five_hour . ,(agent-shell-usage-limits-test--window 0.3 100))))
+       "/a")
+      (add-hook 'agent-shell-usage-limits-update-functions
+                (lambda (_)
+                  (push (agent-shell-usage-limits-utilization 'five_hour) seen)))
+      (agent-shell-usage-limits--on-usage-update
+       (agent-shell-usage-limits-test--event
+        `((five_hour . ,(agent-shell-usage-limits-test--window 0.9 100))))
+       "/b")
+      (agent-shell-usage-limits--on-usage-update
+       (agent-shell-usage-limits-test--event
+        `((five_hour . ,(agent-shell-usage-limits-test--window 0.4 100))))
+       "/a")
+      (should (equal '(40 90) seen)))))
+
+(ert-deftest agent-shell-usage-limits-test-render-account-label ()
+  "%a renders the account's label, from the labels alist or its directory."
+  (agent-shell-usage-limits-test--with-defaults
+    (let ((agent-shell-usage-limits-mode-line-format "%a|%w")
+          (agent-shell-usage-limits-format "%u"))
+      (agent-shell-usage-limits--on-usage-update
+       (agent-shell-usage-limits-test--event
+        `((five_hour . ,(agent-shell-usage-limits-test--window 0.5 100))
+          (seven_day . ,(agent-shell-usage-limits-test--window 0.6 100))))
+       (expand-file-name "~/.claude-work"))
+      (agent-shell-usage-limits--with-account (expand-file-name "~/.claude-work")
+        (should (equal "~/.claude-work|50 60" (agent-shell-usage-limits--render nil)))
+        (let ((agent-shell-usage-limits-account-labels
+               `((,(expand-file-name "~/.claude-work") . "work"))))
+          (should (equal "work|50 60" (agent-shell-usage-limits--render nil)))))
+      ;; Outside any account and any shell, no label.
+      (should (equal "-|50 60" (agent-shell-usage-limits--render nil))))))
+
+(ert-deftest agent-shell-usage-limits-test-details-one-section-per-account ()
+  "With two accounts, details have a titled section for each."
+  (agent-shell-usage-limits-test--with-defaults
+    (agent-shell-usage-limits--on-usage-update
+     (agent-shell-usage-limits-test--event
+      `((five_hour . ,(agent-shell-usage-limits-test--window 0.1 100))))
+     "/home/me/.claude-work")
+    (agent-shell-usage-limits--on-usage-update
+     (agent-shell-usage-limits-test--event
+      `((five_hour . ,(agent-shell-usage-limits-test--window 0.7 100))))
+     "/home/me/.claude")
+    (let ((sections (split-string (agent-shell-usage-limits-details) "\n\n")))
+      (should (= 2 (length sections)))
+      (should (string-prefix-p "Claude Code usage limits: /home/me/.claude (received "
+                               (nth 0 sections)))
+      (should (string-match-p "^5h +70%" (nth 0 sections)))
+      (should (string-prefix-p "Claude Code usage limits: /home/me/.claude-work (received "
+                               (nth 1 sections)))
+      (should (string-match-p "^5h +10%" (nth 1 sections))))))
 
 (provide 'agent-shell-usage-limits-test)
 ;;; agent-shell-usage-limits-test.el ends here

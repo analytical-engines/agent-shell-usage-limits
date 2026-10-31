@@ -102,6 +102,7 @@
 (declare-function agent-shell-unsubscribe "agent-shell")
 (declare-function agent-shell-get-config "agent-shell")
 (defvar agent-shell-mode-hook)
+(defvar agent-shell--state)
 
 (defgroup agent-shell-usage-limits nil
   "Show Claude Code usage limits in agent-shell mode lines."
@@ -157,8 +158,19 @@ Values not received yet are \"-\".  Width specs such as %3u work."
   "Format of the whole mode line display, in `format-spec' syntax.
 %w is the windows of `agent-shell-usage-limits-mode-line-windows', each
 rendered with `agent-shell-usage-limits-format' and joined with
-`agent-shell-usage-limits-separator'."
+`agent-shell-usage-limits-separator'.
+%a is the label of the buffer's account (see
+`agent-shell-usage-limits-account-label'), for example \" %a %w \" when
+shells of several accounts are open."
   :type 'string)
+
+(defcustom agent-shell-usage-limits-account-labels nil
+  "Labels for accounts, as an alist of (CONFIG-DIR . LABEL).
+CONFIG-DIR is the Claude Code config directory that identifies the
+account, as `agent-shell-usage-limits-account' returns it, such as
+\"/home/me/.claude-work\".  Accounts not listed are labelled with their
+abbreviated directory, such as \"~/.claude-work\"."
+  :type '(alist :key-type string :value-type string))
 
 (defcustom agent-shell-usage-limits-time-format-short "%h:%02m"
   "Format of the time left when it is under 24 hours (`format-spec').
@@ -198,11 +210,20 @@ wherever you like.  Toggle the mode off and on to apply a change."
 
 (defvar agent-shell-usage-limits-update-functions nil
   "Functions called each time a new rate limit arrives.
-Each is called with the `_claude/rateLimit' alist as its only argument.
-The accessors such as `agent-shell-usage-limits-utilization' already
-return the new values when they run.")
+Each is called with the `_claude/rateLimit' alist as its only argument,
+in the shell buffer that received it.  The accessors such as
+`agent-shell-usage-limits-utilization' already return the new values of
+that buffer's account when they run, and
+`agent-shell-usage-limits-account' returns the account.")
 
 ;;;; Values received
+
+;; The values belong to a Claude account.  An account is identified by the
+;; Claude Code config directory its shell runs with (CLAUDE_CONFIG_DIR),
+;; and `agent-shell-usage-limits-accounts' keeps one set of values per
+;; account.  The three variables below hold the values of one account:
+;; the account last updated, or, inside
+;; `agent-shell-usage-limits--with-account', the account given to it.
 
 (defvar agent-shell-usage-limits-rate-limit nil
   "The last `_claude/rateLimit' alist received from Claude Code.")
@@ -217,6 +238,91 @@ window's entry of `unifiedWindows' and TIME its `float-time' of arrival.
 A per-model window such as the Fable one arrives only with updates from
 that model's sessions, so windows are merged one by one instead of
 replacing the whole set; an update from another model keeps it.")
+
+(defvar agent-shell-usage-limits-accounts nil
+  "The values received for each account.
+An alist of (ACCOUNT . (:rate-limit RATE-LIMIT :updated-at TIME :windows
+WINDOWS)), where ACCOUNT is a config directory as returned by
+`agent-shell-usage-limits-account' and the rest are the values of
+`agent-shell-usage-limits-rate-limit', `agent-shell-usage-limits-updated-at'
+and `agent-shell-usage-limits-windows' for that account.")
+
+(defvar agent-shell-usage-limits--bound-account nil
+  "The account bound by the innermost `agent-shell-usage-limits--with-account'.")
+
+(defmacro agent-shell-usage-limits--with-account (account &rest body)
+  "Run BODY with the value variables bound to the values of ACCOUNT.
+An account with nothing received yet has them all nil."
+  (declare (indent 1) (debug t))
+  (let ((entry (make-symbol "entry")))
+    `(let* ((agent-shell-usage-limits--bound-account ,account)
+            (,entry (alist-get agent-shell-usage-limits--bound-account
+                               agent-shell-usage-limits-accounts nil nil #'equal))
+            (agent-shell-usage-limits-rate-limit (plist-get ,entry :rate-limit))
+            (agent-shell-usage-limits-updated-at (plist-get ,entry :updated-at))
+            (agent-shell-usage-limits-windows (plist-get ,entry :windows)))
+       ,@body)))
+
+(defun agent-shell-usage-limits--account-from-environment (environment)
+  "Return the config directory that Claude Code sees with ENVIRONMENT.
+ENVIRONMENT is a list of \"VAR=value\" strings put in front of
+`process-environment', the way acp.el starts the agent.  The directory
+is CLAUDE_CONFIG_DIR when set and \"~/.claude\" otherwise, expanded but
+with symbolic links left as they are, so two directories that link to
+one count as two accounts.  For example:
+
+  (agent-shell-usage-limits--account-from-environment
+   \\='(\"CLAUDE_CONFIG_DIR=~/.claude-work/\"))
+  => \"/home/me/.claude-work\""
+  (let* ((process-environment (append environment process-environment))
+         (dir (getenv "CLAUDE_CONFIG_DIR")))
+    (directory-file-name
+     (expand-file-name (if (and dir (not (string-empty-p dir))) dir "~/.claude")))))
+
+(defun agent-shell-usage-limits-account (&optional buffer)
+  "Return the account of the agent-shell BUFFER, the current buffer by default.
+The account is the Claude Code config directory the agent was started
+with; see `agent-shell-usage-limits--account-from-environment'."
+  (with-current-buffer (or buffer (current-buffer))
+    (agent-shell-usage-limits--account-from-environment
+     ;; agent-shell keeps the ACP client in its buffer state, and acp.el
+     ;; keeps the environment the agent process was started with.
+     (map-elt (map-elt (bound-and-true-p agent-shell--state) :client)
+              :environment-variables))))
+
+(defun agent-shell-usage-limits-account-label (account)
+  "Return the label of ACCOUNT for display.
+From `agent-shell-usage-limits-account-labels', or else the abbreviated
+directory, such as \"~/.claude-work\"."
+  (or (cdr (assoc account agent-shell-usage-limits-account-labels))
+      (abbreviate-file-name account)))
+
+(defun agent-shell-usage-limits-account-list ()
+  "Return the accounts that values have been received for, sorted."
+  (sort (mapcar #'car agent-shell-usage-limits-accounts) #'string<))
+
+(defun agent-shell-usage-limits--store (account rate-limit time)
+  "Store RATE-LIMIT as received for ACCOUNT at TIME.
+Also make it the account last updated, whose values the value
+variables hold outside `agent-shell-usage-limits--with-account'."
+  (let ((agent-shell-usage-limits-windows
+         (plist-get (alist-get account agent-shell-usage-limits-accounts nil nil #'equal)
+                    :windows)))
+    (agent-shell-usage-limits--remember-windows rate-limit time)
+    (setf (alist-get account agent-shell-usage-limits-accounts nil nil #'equal)
+          (list :rate-limit rate-limit :updated-at time
+                :windows agent-shell-usage-limits-windows)))
+  (let ((entry (alist-get account agent-shell-usage-limits-accounts nil nil #'equal)))
+    (setq agent-shell-usage-limits-rate-limit rate-limit
+          agent-shell-usage-limits-updated-at time
+          agent-shell-usage-limits-windows (plist-get entry :windows))))
+
+(defun agent-shell-usage-limits--display-account ()
+  "Return the account whose values the current buffer shows.
+The buffer's own account in a watched shell, else nil for the account
+last updated."
+  (and (agent-shell-usage-limits--watched-buffer-p)
+       (agent-shell-usage-limits-account)))
 
 (defun agent-shell-usage-limits--remember-windows (rate-limit time)
   "Store each window of RATE-LIMIT's `unifiedWindows' as received at TIME."
@@ -240,20 +346,41 @@ and `seven-day'."
                         agent-shell-usage-limits-windows)
              :window))
 
-(defun agent-shell-usage-limits-window-received (window)
-  "Return when WINDOW was last received, as `float-time', or nil if never."
-  (plist-get (alist-get (agent-shell-usage-limits--window-key window)
-                        agent-shell-usage-limits-windows)
-             :received))
+(defmacro agent-shell-usage-limits--for-account (account &rest body)
+  "Run BODY with the values of ACCOUNT, or of the shown account when nil.
+When ACCOUNT is nil and an enclosing `agent-shell-usage-limits--with-account'
+has bound one, that one is kept.  Otherwise the shown account is the
+current buffer's in a watched shell, and the account last updated
+anywhere else."
+  (declare (indent 1) (debug t))
+  (let ((acct (make-symbol "account"))
+        (fn (make-symbol "body")))
+    `(let ((,acct ,account)
+           (,fn (lambda () ,@body)))
+       (unless (or ,acct agent-shell-usage-limits--bound-account)
+         (setq ,acct (agent-shell-usage-limits--display-account)))
+       (if (and ,acct (not (equal ,acct agent-shell-usage-limits--bound-account)))
+           (agent-shell-usage-limits--with-account ,acct (funcall ,fn))
+         (funcall ,fn)))))
 
-(defun agent-shell-usage-limits-window-keys ()
+(defun agent-shell-usage-limits-window-received (window &optional account)
+  "Return when WINDOW was last received, as `float-time', or nil if never.
+ACCOUNT as for `agent-shell-usage-limits-utilization'."
+  (agent-shell-usage-limits--for-account account
+    (plist-get (alist-get (agent-shell-usage-limits--window-key window)
+                          agent-shell-usage-limits-windows)
+               :received)))
+
+(defun agent-shell-usage-limits-window-keys (&optional account)
   "Return the keys of every window received so far, in display order.
 The order of `agent-shell-usage-limits-window-labels' first, then the
-windows not listed there, oldest first."
-  (let ((known (mapcar #'car agent-shell-usage-limits-window-labels))
-        (received (mapcar #'car agent-shell-usage-limits-windows)))
-    (append (seq-filter (lambda (key) (memq key received)) known)
-            (seq-remove (lambda (key) (memq key known)) (reverse received)))))
+windows not listed there, oldest first.  ACCOUNT as for
+`agent-shell-usage-limits-utilization'."
+  (agent-shell-usage-limits--for-account account
+    (let ((known (mapcar #'car agent-shell-usage-limits-window-labels))
+          (received (mapcar #'car agent-shell-usage-limits-windows)))
+      (append (seq-filter (lambda (key) (memq key received)) known)
+              (seq-remove (lambda (key) (memq key known)) (reverse received))))))
 
 (defun agent-shell-usage-limits-window-label (window)
   "Return the label of WINDOW, or its key name when it has no label."
@@ -261,21 +388,28 @@ windows not listed there, oldest first."
     (or (alist-get key agent-shell-usage-limits-window-labels)
         (symbol-name key))))
 
-(defun agent-shell-usage-limits-utilization (window)
+(defun agent-shell-usage-limits-utilization (window &optional account)
   "Return the utilization of WINDOW as a whole percent, or nil if none yet.
-For example 7 for a utilization of 0.07."
-  (when-let* ((util (map-elt (agent-shell-usage-limits--window window) 'utilization)))
-    (round (* 100 util))))
+For example 7 for a utilization of 0.07.  The values are those of
+ACCOUNT (see `agent-shell-usage-limits-account'); by default of the
+current buffer's account in a watched shell, else of the account last
+updated."
+  (agent-shell-usage-limits--for-account account
+    (when-let* ((util (map-elt (agent-shell-usage-limits--window window) 'utilization)))
+      (round (* 100 util)))))
 
-(defun agent-shell-usage-limits-resets-at (window)
-  "Return when WINDOW resets, as `float-time', or nil if none yet."
-  (let ((resets (map-elt (agent-shell-usage-limits--window window) 'resetsAt)))
-    (and (numberp resets) (float resets))))
+(defun agent-shell-usage-limits-resets-at (window &optional account)
+  "Return when WINDOW resets, as `float-time', or nil if none yet.
+ACCOUNT as for `agent-shell-usage-limits-utilization'."
+  (agent-shell-usage-limits--for-account account
+    (let ((resets (map-elt (agent-shell-usage-limits--window window) 'resetsAt)))
+      (and (numberp resets) (float resets)))))
 
-(defun agent-shell-usage-limits-seconds-until-reset (window)
+(defun agent-shell-usage-limits-seconds-until-reset (window &optional account)
   "Return the seconds left until WINDOW resets, or nil if none yet.
-Zero once the reset time has passed."
-  (when-let* ((resets (agent-shell-usage-limits-resets-at window)))
+Zero once the reset time has passed.  ACCOUNT as for
+`agent-shell-usage-limits-utilization'."
+  (when-let* ((resets (agent-shell-usage-limits-resets-at window account)))
     (max 0 (- resets (float-time)))))
 
 ;;;; Receiving from agent-shell
@@ -283,15 +417,16 @@ Zero once the reset time has passed."
 (defvar-local agent-shell-usage-limits--subscription nil
   "Token of this buffer's `usage-update' subscription, for unsubscribing.")
 
-(defun agent-shell-usage-limits--on-usage-update (event)
-  "Keep the `_claude/rateLimit' carried by the `usage-update' EVENT, if any."
+(defun agent-shell-usage-limits--on-usage-update (event &optional account)
+  "Keep the `_claude/rateLimit' carried by the `usage-update' EVENT, if any.
+The values are stored for ACCOUNT, by default the account of the
+current buffer (see `agent-shell-usage-limits-account')."
   (when-let* ((rate-limit (map-nested-elt event '(:data :meta _claude/rateLimit))))
-    (setq agent-shell-usage-limits-rate-limit rate-limit
-          agent-shell-usage-limits-updated-at (float-time))
-    (agent-shell-usage-limits--remember-windows rate-limit
-                                                agent-shell-usage-limits-updated-at)
-    (force-mode-line-update t)
-    (run-hook-with-args 'agent-shell-usage-limits-update-functions rate-limit)))
+    (let ((account (or account (agent-shell-usage-limits-account))))
+      (agent-shell-usage-limits--store account rate-limit (float-time))
+      (force-mode-line-update t)
+      (agent-shell-usage-limits--with-account account
+        (run-hook-with-args 'agent-shell-usage-limits-update-functions rate-limit)))))
 
 (defun agent-shell-usage-limits--watched-buffer-p ()
   "Return non-nil if the current buffer is a shell of a watched agent.
@@ -308,11 +443,17 @@ Does nothing when already subscribed."
   (when (and (agent-shell-usage-limits--watched-buffer-p)
              (fboundp 'agent-shell-subscribe-to)
              (null agent-shell-usage-limits--subscription))
-    (setq agent-shell-usage-limits--subscription
-          (agent-shell-subscribe-to
-           :shell-buffer (current-buffer)
-           :event 'usage-update
-           :on-event #'agent-shell-usage-limits--on-usage-update))))
+    (let ((buffer (current-buffer)))
+      (setq agent-shell-usage-limits--subscription
+            (agent-shell-subscribe-to
+             :shell-buffer buffer
+             :event 'usage-update
+             :on-event (lambda (event)
+                         ;; Store under this shell's account, whatever
+                         ;; buffer is current when the event arrives.
+                         (when (buffer-live-p buffer)
+                           (with-current-buffer buffer
+                             (agent-shell-usage-limits--on-usage-update event)))))))))
 
 (defun agent-shell-usage-limits--unsubscribe ()
   "Drop the current buffer's `usage-update' subscription, if any."
@@ -378,7 +519,12 @@ With PLACEHOLDER non-nil, put asterisks where the numbers would be."
                `((?w . ,(mapconcat (lambda (window)
                                      (agent-shell-usage-limits--render-window window placeholder))
                                    agent-shell-usage-limits-mode-line-windows
-                                   agent-shell-usage-limits-separator)))))
+                                   agent-shell-usage-limits-separator))
+                 (?a . ,(let ((account (or agent-shell-usage-limits--bound-account
+                                           (agent-shell-usage-limits--display-account))))
+                          (if account
+                              (agent-shell-usage-limits-account-label account)
+                            "-"))))))
 
 (defun agent-shell-usage-limits--face ()
   "Return the face for the mode line text, from the highest shown utilization.
@@ -395,11 +541,35 @@ the mode line's own colors."
 (defun agent-shell-usage-limits-details ()
   "Return a multi-line description of every window received so far.
 Each line has the label, utilization, reset time and time left.  A window
-older than the latest update by more than a minute gets its own time of
-arrival, and one whose reset time has passed says so."
+older than the latest update of its account by more than a minute gets
+its own time of arrival, and one whose reset time has passed says so.
+
+With values from several accounts, there is one section per account,
+headed by its label, the current buffer's account first."
+  (let* ((accounts (agent-shell-usage-limits-account-list))
+         (shown (agent-shell-usage-limits--display-account)))
+    (cond
+     ((null accounts)
+      "Claude Code usage limits: waiting for the first update")
+     ((null (cdr accounts))
+      (agent-shell-usage-limits--with-account (car accounts)
+        (agent-shell-usage-limits--details-section "Claude Code usage limits")))
+     (t
+      (when (member shown accounts)
+        (setq accounts (cons shown (delete shown accounts))))
+      (mapconcat (lambda (account)
+                   (agent-shell-usage-limits--with-account account
+                     (agent-shell-usage-limits--details-section
+                      (format "Claude Code usage limits: %s"
+                              (agent-shell-usage-limits-account-label account)))))
+                 accounts
+                 "\n\n")))))
+
+(defun agent-shell-usage-limits--details-section (title)
+  "Return the details of the windows in the value variables, under TITLE."
   (let ((keys (agent-shell-usage-limits-window-keys)))
     (if (null keys)
-        "Claude Code usage limits: waiting for the first update"
+        (format "%s: waiting for the first update" title)
       (let* ((width (apply #'max
                            (mapcar (lambda (key)
                                      (string-width (agent-shell-usage-limits-window-label key)))
@@ -422,7 +592,8 @@ arrival, and one whose reset time has passed says so."
                              (format "(in %s)" (agent-shell-usage-limits--format-duration left))))
                    (when stale
                      (format "  as of %s" (format-time-string "%m/%d %H:%M" received))))))))
-        (concat (format "Claude Code usage limits (received %s)\n"
+        (concat (format "%s (received %s)\n"
+                        title
                         (format-time-string "%H:%M:%S" agent-shell-usage-limits-updated-at))
                 (mapconcat line keys "\n"))))))
 
@@ -498,12 +669,18 @@ button is released."
 
 (defun agent-shell-usage-limits-string ()
   "Return the usage limits text for the mode line.
-Before the first update the numbers are asterisks in the `shadow' face."
-  (let* ((received (and agent-shell-usage-limits-windows t))
-         (text (agent-shell-usage-limits--render (not received))))
+Before the first update the numbers are asterisks in the `shadow' face.
+In a watched shell the values are those of the shell's account (see
+`agent-shell-usage-limits-account'), elsewhere of the account last
+updated."
+  (let (received text face)
+    (agent-shell-usage-limits--for-account nil
+      (setq received (and agent-shell-usage-limits-windows t)
+            text (agent-shell-usage-limits--render (not received))
+            face (if received (agent-shell-usage-limits--face) 'shadow)))
     ;; A percent sign is special in the mode line.
     (propertize (string-replace "%" "%%" text)
-                'face (if received (agent-shell-usage-limits--face) 'shadow)
+                'face face
                 ;; Where the popover works, the tooltip only explains the
                 ;; mouse, to avoid showing the details twice.
                 'help-echo (lambda (&rest _)
