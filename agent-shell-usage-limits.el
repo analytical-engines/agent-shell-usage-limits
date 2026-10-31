@@ -689,16 +689,21 @@ That is any graphical frame, and a terminal frame on Emacs 31 or later."
        (posframe-workable-p)))
 
 (defun agent-shell-usage-limits-describe (&optional event)
-  "Show the details of every usage limit window received so far.
+  "Show the details of the usage limit windows of this shell's account.
 Shows a popover above the right end of the mode line when posframe is
 workable, otherwise the text in the echo area.  The popover closes at
 the next command.  When called from the mode line by mouse (EVENT
-non-nil), the popover goes to the clicked window and closes when the
-button is released."
+non-nil), the details are those of the clicked window's buffer, the
+popover goes to that window and closes when the button is released."
   (interactive (list (and (mouse-event-p last-input-event) last-input-event)))
-  (let ((text (agent-shell-usage-limits-details))
-        (window (or (and event (posn-window (event-start event)))
-                    (selected-window))))
+  (let* ((window (or (and event (posn-window (event-start event)))
+                     (selected-window)))
+         ;; A mode line click does not select its window, so take the
+         ;; details from that window's buffer rather than the current one.
+         (text (if (window-live-p window)
+                   (with-current-buffer (window-buffer window)
+                     (agent-shell-usage-limits-details))
+                 (agent-shell-usage-limits-details))))
     (if (and (window-live-p window)
              (with-selected-window window (agent-shell-usage-limits--popover-p)))
         (with-selected-window window
@@ -871,10 +876,13 @@ updated."
                 'face face
                 ;; Where the popover works, the tooltip only explains the
                 ;; mouse, to avoid showing the details twice.
-                'help-echo (lambda (&rest _)
+                'help-echo (lambda (window &rest _)
                              (if (agent-shell-usage-limits--popover-p)
                                  "mouse-1 (hold): show usage limit details"
-                               (agent-shell-usage-limits-details)))
+                               ;; The mouse is over WINDOW's mode line, which
+                               ;; need not be the selected window.
+                               (with-current-buffer (window-buffer window)
+                                 (agent-shell-usage-limits-details))))
                 'local-map agent-shell-usage-limits-mode-line-map
                 'mouse-face 'mode-line-highlight)))
 

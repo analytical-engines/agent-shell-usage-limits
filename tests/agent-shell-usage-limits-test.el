@@ -422,6 +422,37 @@ WINDOWS is an alist of (KEY . ((utilization . U) (resetsAt . T)))."
                                     (agent-shell-usage-limits-details "/home/me/.claude-work")
                                     "\n"))))))
 
+(ert-deftest agent-shell-usage-limits-test-describe-uses-clicked-window ()
+  "A mode line click shows the clicked window's account, not the selected one."
+  (agent-shell-usage-limits-test--with-defaults
+    (agent-shell-usage-limits--on-usage-update
+     (agent-shell-usage-limits-test--event
+      `((five_hour . ,(agent-shell-usage-limits-test--window 0.1 100))))
+     "/a")
+    (agent-shell-usage-limits--on-usage-update
+     (agent-shell-usage-limits-test--event
+      `((five_hour . ,(agent-shell-usage-limits-test--window 0.7 100))))
+     "/b")
+    (let ((clicked (generate-new-buffer "clicked"))
+          (selected (generate-new-buffer "selected"))
+          shown)
+      (unwind-protect
+          (cl-letf (((symbol-function 'agent-shell-usage-limits--display-account)
+                     (lambda () (if (eq (current-buffer) clicked) "/a" "/b")))
+                    ((symbol-function 'agent-shell-usage-limits--popover-p) (lambda () nil))
+                    ((symbol-function 'message) (lambda (_format text) (setq shown text))))
+            (save-window-excursion
+              (delete-other-windows)
+              (set-window-buffer (selected-window) selected)
+              (let ((other (split-window)))
+                (set-window-buffer other clicked)
+                ;; A down-mouse-1 on the mode line of the other window.
+                (agent-shell-usage-limits-describe
+                 (list 'down-mouse-1 (list other 0 '(0 . 0) 0 nil 0 '(0 . 0) 'mode-line))))))
+        (kill-buffer clicked)
+        (kill-buffer selected))
+      (should (string-match-p "^5h +10%" shown)))))
+
 (ert-deftest agent-shell-usage-limits-test-list-one-row-per-account ()
   "The list buffer has a row per account with a cell per window received."
   (agent-shell-usage-limits-test--with-defaults
