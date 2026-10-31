@@ -608,7 +608,8 @@ older than the latest update of its account by more than a minute gets
 its own time of arrival, and one whose reset time has passed says so.
 
 With values from several accounts, there is one section per account,
-headed by its label, the current buffer's account first."
+headed by its label, the current buffer's account first and marked
+\"(this shell)\"."
   (let* ((accounts (agent-shell-usage-limits-account-list))
          (shown (agent-shell-usage-limits--display-account)))
     (cond
@@ -623,8 +624,9 @@ headed by its label, the current buffer's account first."
       (mapconcat (lambda (account)
                    (agent-shell-usage-limits--with-account account
                      (agent-shell-usage-limits--details-section
-                      (format "Claude Code usage limits: %s"
-                              (agent-shell-usage-limits-account-label account)))))
+                      (format "Claude Code usage limits: %s%s"
+                              (agent-shell-usage-limits-account-label account)
+                              (if (equal account shown) " (this shell)" "")))))
                  accounts
                  "\n\n")))))
 

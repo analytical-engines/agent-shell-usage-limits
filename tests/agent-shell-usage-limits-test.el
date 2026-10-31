@@ -409,7 +409,16 @@ WINDOWS is an alist of (KEY . ((utilization . U) (resetsAt . T)))."
       (should (string-match-p "^5h +70%" (nth 0 sections)))
       (should (string-prefix-p "Claude Code usage limits: /home/me/.claude-work (received "
                                (nth 1 sections)))
-      (should (string-match-p "^5h +10%" (nth 1 sections))))))
+      (should (string-match-p "^5h +10%" (nth 1 sections))))
+    ;; In a shell of one of the accounts, its section comes first, marked.
+    (cl-letf (((symbol-function 'agent-shell-usage-limits--display-account)
+               (lambda () "/home/me/.claude-work")))
+      (let ((sections (split-string (agent-shell-usage-limits-details) "\n\n")))
+        (should (string-prefix-p
+                 "Claude Code usage limits: /home/me/.claude-work (this shell) (received "
+                 (nth 0 sections)))
+        (should (string-prefix-p "Claude Code usage limits: /home/me/.claude (received "
+                                 (nth 1 sections)))))))
 
 (provide 'agent-shell-usage-limits-test)
 ;;; agent-shell-usage-limits-test.el ends here
