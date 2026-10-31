@@ -279,16 +279,26 @@ one count as two accounts.  For example:
     (directory-file-name
      (expand-file-name (if (and dir (not (string-empty-p dir))) dir "~/.claude")))))
 
+(defvar-local agent-shell-usage-limits--account nil
+  "The account of this shell, once `agent-shell-usage-limits-account' found it.
+Kept so that later changes to `process-environment', such as direnv
+switching it when another buffer is selected, do not move the shell to
+another account.")
+
 (defun agent-shell-usage-limits-account (&optional buffer)
   "Return the account of the agent-shell BUFFER, the current buffer by default.
 The account is the Claude Code config directory the agent was started
-with; see `agent-shell-usage-limits--account-from-environment'."
+with; see `agent-shell-usage-limits--account-from-environment'.  It is
+found once per buffer and then kept."
   (with-current-buffer (or buffer (current-buffer))
-    (agent-shell-usage-limits--account-from-environment
-     ;; agent-shell keeps the ACP client in its buffer state, and acp.el
-     ;; keeps the environment the agent process was started with.
-     (map-elt (map-elt (bound-and-true-p agent-shell--state) :client)
-              :environment-variables))))
+    (or agent-shell-usage-limits--account
+        (setq agent-shell-usage-limits--account
+              (agent-shell-usage-limits--account-from-environment
+               ;; agent-shell keeps the ACP client in its buffer state, and
+               ;; acp.el keeps the variables it puts in front of
+               ;; `process-environment' when starting the agent.
+               (map-elt (map-elt (bound-and-true-p agent-shell--state) :client)
+                        :environment-variables))))))
 
 (defun agent-shell-usage-limits-account-label (account)
   "Return the label of ACCOUNT for display.
@@ -443,6 +453,9 @@ Does nothing when already subscribed."
   (when (and (agent-shell-usage-limits--watched-buffer-p)
              (fboundp 'agent-shell-subscribe-to)
              (null agent-shell-usage-limits--subscription))
+    ;; Settle the account now, while the environment is the one the
+    ;; agent is started with.
+    (agent-shell-usage-limits-account)
     (let ((buffer (current-buffer)))
       (setq agent-shell-usage-limits--subscription
             (agent-shell-subscribe-to

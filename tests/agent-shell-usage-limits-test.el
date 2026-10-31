@@ -252,6 +252,18 @@ WINDOWS is an alist of (KEY . ((utilization . U) (resetsAt . T)))."
                    (agent-shell-usage-limits--account-from-environment
                     '("CLAUDE_CONFIG_DIR=/tmp/per-client"))))))
 
+(ert-deftest agent-shell-usage-limits-test-account-is-kept-per-buffer ()
+  "Once found, a buffer's account survives changes to the environment."
+  (with-temp-buffer
+    (let ((process-environment (cons "CLAUDE_CONFIG_DIR=/tmp/project-a" process-environment)))
+      (should (equal "/tmp/project-a" (agent-shell-usage-limits-account))))
+    ;; direnv switching the global environment for another buffer.
+    (let ((process-environment (cons "CLAUDE_CONFIG_DIR=/tmp/project-b" process-environment)))
+      (should (equal "/tmp/project-a" (agent-shell-usage-limits-account))))
+    (with-temp-buffer
+      (let ((process-environment (cons "CLAUDE_CONFIG_DIR=/tmp/project-b" process-environment)))
+        (should (equal "/tmp/project-b" (agent-shell-usage-limits-account)))))))
+
 (ert-deftest agent-shell-usage-limits-test-account-symlink-is-another-account ()
   "A directory linking to another one is a separate account."
   (let* ((dir (make-temp-file "asul-test" t))
