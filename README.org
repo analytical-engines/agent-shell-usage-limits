@@ -189,7 +189,7 @@ mode line, for example =" %a %w "=.
 
 There are two ways to run shells with different accounts.
 
-**Per agent config.** =agent-shell-usage-limits-make-claude-code-config=
+*Per agent config.* =agent-shell-usage-limits-make-claude-code-config=
 returns agent-shell's Claude Code config with another name and config
 directory.  Add it to =agent-shell-agent-configs= and it appears in the
 agent picker:
@@ -201,7 +201,7 @@ agent picker:
                 :name "Claude (work)" :config-dir "~/.claude-work")))
 #+end_src
 
-**Per project.** If a project's environment sets =CLAUDE_CONFIG_DIR=, for
+*Per project.* If a project's environment sets =CLAUDE_CONFIG_DIR=, for
 example with direnv and an =.envrc= containing
 =export CLAUDE_CONFIG_DIR=$HOME/.claude-work=, shells started from that
 project use that account.  The agent gets the environment in effect when
