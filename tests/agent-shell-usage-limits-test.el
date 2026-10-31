@@ -24,6 +24,10 @@
 (require 'ert)
 (require 'agent-shell-usage-limits)
 
+;; agent-shell is not loaded in the tests; make this a dynamic variable
+;; here too, so `let' binds it the way the package reads it.
+(defvar agent-shell-anthropic-claude-environment)
+
 (defmacro agent-shell-usage-limits-test--with-defaults (&rest body)
   "Run BODY with empty state and the default customization."
   (declare (indent 0))
@@ -358,6 +362,34 @@ WINDOWS is an alist of (KEY . ((utilization . U) (resetsAt . T)))."
           (should (equal "work|50 60" (agent-shell-usage-limits--render nil)))))
       ;; Outside any account and any shell, no label.
       (should (equal "-|50 60" (agent-shell-usage-limits--render nil))))))
+
+(ert-deftest agent-shell-usage-limits-test-make-claude-code-config ()
+  "The config for another account renames the shell and sets the directory."
+  (let ((agent-shell-anthropic-claude-environment '("OTHER=1"))
+        made-with)
+    (cl-letf (((symbol-function 'agent-shell-anthropic-make-claude-code-config)
+               (lambda ()
+                 (list (cons :identifier 'claude-code)
+                       (cons :buffer-name "Claude")
+                       (cons :mode-line-name "Claude")
+                       (cons :client-maker (lambda (_buffer) 'original)))))
+              ((symbol-function 'agent-shell-anthropic-make-claude-client)
+               (lambda (&key buffer)
+                 (setq made-with (list buffer agent-shell-anthropic-claude-environment))
+                 'client)))
+      (let ((config (agent-shell-usage-limits-make-claude-code-config
+                     :name "Claude (work)" :config-dir "~/.claude-work")))
+        (should (eq 'claude-code (alist-get :identifier config)))
+        (should (equal "Claude (work)" (alist-get :buffer-name config)))
+        (should (equal "Claude (work)" (alist-get :mode-line-name config)))
+        (should (eq 'client (funcall (alist-get :client-maker config) 'the-buffer)))
+        (should (equal (list 'the-buffer
+                             (list (concat "CLAUDE_CONFIG_DIR=" (expand-file-name "~/.claude-work"))
+                                   "OTHER=1"))
+                       made-with))
+        ;; The binding was dynamic: the variable is back to its value.
+        (should (equal '("OTHER=1") agent-shell-anthropic-claude-environment))))
+    (should-error (agent-shell-usage-limits-make-claude-code-config :name "x"))))
 
 (ert-deftest agent-shell-usage-limits-test-details-one-section-per-account ()
   "With two accounts, details have a titled section for each."

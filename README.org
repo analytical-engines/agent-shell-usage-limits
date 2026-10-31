@@ -136,7 +136,12 @@ The values are available to your own code:
 (agent-shell-usage-limits-resets-at 'seven_day)           ; => 1793588400.0 (float-time)
 (agent-shell-usage-limits-seconds-until-reset 'five_hour) ; => 12000.0
 (agent-shell-usage-limits-window-keys)                    ; => (five_hour seven_day seven_day_overage_included)
+(agent-shell-usage-limits-account-list)                   ; => ("/home/me/.claude" "/home/me/.claude-work")
 #+end_src
+
+Each takes an optional account (a config directory, see below).  Without
+one, they read the current buffer's account in a shell, and the account
+last updated anywhere else.
 
 =agent-shell-usage-limits-update-functions= is a hook run with the
 =_claude/rateLimit= alist each time a new one arrives.  For example, to be
@@ -161,11 +166,68 @@ When one does, support means reading its =_meta= in
 identifier in =agent-shell-usage-limits-agent-identifiers=; pull requests
 are welcome.
 
+* Several accounts
+
+The values belong to a Claude account, and the package keeps one set per
+account.  A shell's account is the Claude Code config directory its agent
+runs with: =CLAUDE_CONFIG_DIR=, or =~/.claude= when it is not set.  Each
+shell's mode line shows the values of its own account, and the details
+list one section per account, the current shell's first:
+
+[[file:screenshots/accounts.png]]
+
+Accounts are labelled with their directory.  To label them yourself:
+
+#+begin_src emacs-lisp
+(setq agent-shell-usage-limits-account-labels
+      '(("/home/me/.claude" . "home")
+        ("/home/me/.claude-work" . "work")))
+#+end_src
+
+=%a= in =agent-shell-usage-limits-mode-line-format= puts the label in the
+mode line, for example =" %a %w "=.
+
+There are two ways to run shells with different accounts.
+
+**Per agent config.** =agent-shell-usage-limits-make-claude-code-config=
+returns agent-shell's Claude Code config with another name and config
+directory.  Add it to =agent-shell-agent-configs= and it appears in the
+agent picker:
+
+#+begin_src emacs-lisp
+(add-to-list 'agent-shell-agent-configs
+             (lambda ()
+               (agent-shell-usage-limits-make-claude-code-config
+                :name "Claude (work)" :config-dir "~/.claude-work")))
+#+end_src
+
+**Per project.** If a project's environment sets =CLAUDE_CONFIG_DIR=, for
+example with direnv and an =.envrc= containing
+=export CLAUDE_CONFIG_DIR=$HOME/.claude-work=, shells started from that
+project use that account.  The agent gets the environment in effect when
+it is started, so start the shell with a buffer of that project selected;
+with emacs-direnv, which switches the global environment by selected
+buffer, starting it from another project's buffer or from a sidebar gives
+the agent the wrong environment.
+
+Either way, Claude Code must be logged in for each config directory.  On
+macOS the login is kept in the Keychain, one entry per directory, so even a
+directory that is a symbolic link to =~/.claude= needs its own login:
+
+#+begin_example
+CLAUDE_CONFIG_DIR=~/.claude-work claude auth login
+#+end_example
+
+Status: tested with two config directories of one account, which showed
+up as two accounts with their own values and sections.  Shells of two
+different accounts, with different values, have not been tried yet;
+reports are welcome.
+
 * Limitations
 
-- One set of values for all shells.  Shells connected with different
-  Claude accounts (agent configs that set =CLAUDE_CONFIG_DIR=) overwrite
-  each other's values.  Keeping values per account is planned.
+- Accounts are told apart by config directory only, so two directories
+  logged into the same account count as two accounts.  Using the account
+  that Claude Code reports instead is planned.
 
 * Acknowledgements
 

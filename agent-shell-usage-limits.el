@@ -4,7 +4,7 @@
 
 ;; Author: Tomohiro Miyasaka <tomohiro.miyasaka@analytical-engines.com>
 ;; URL: https://github.com/analytical-engines/agent-shell-usage-limits
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "29.1") (agent-shell "0.89.0"))
 ;; Keywords: tools, convenience
 
@@ -65,17 +65,33 @@
 ;;   `agent-shell-usage-limits-error-threshold'    percent for `error'
 ;;   `agent-shell-usage-limits-placement'          where to show
 ;;   `agent-shell-usage-limits-agent-identifiers'  which shells to watch
+;;   `agent-shell-usage-limits-account-labels'     account -> label
+;;
+;; Several accounts:
+;;
+;; The values belong to a Claude account.  A shell's account is the
+;; Claude Code config directory its agent runs with (CLAUDE_CONFIG_DIR,
+;; or ~/.claude when unset), and one set of values is kept per account.
+;; A shell shows the values of its own account; the details list one
+;; section per account.  `agent-shell-usage-limits-make-claude-code-config'
+;; makes an agent config for another account, and direnv-style per
+;; project environments work too, as long as the shell is started with
+;; that environment in effect.
 ;;
 ;; Using the values elsewhere:
 ;;
 ;;   (agent-shell-usage-limits-utilization 'five_hour)        => 7
 ;;   (agent-shell-usage-limits-resets-at 'seven_day)          => 1793588400.0
 ;;   (agent-shell-usage-limits-seconds-until-reset 'five_hour) => 12000.0
+;;   (agent-shell-usage-limits-account-list)  => ("/home/me/.claude" ...)
 ;;
-;; All three return nil until a value has been received.  Functions on
-;; `agent-shell-usage-limits-update-functions' are called with the
-;; `_claude/rateLimit' alist each time a new one arrives, for example to
-;; warn when the 5-hour window passes 80 percent:
+;; All three return nil until a value has been received.  They take an
+;; optional account; by default they read the current buffer's account
+;; in a watched shell and the account last updated elsewhere.  Functions
+;; on `agent-shell-usage-limits-update-functions' are called with the
+;; `_claude/rateLimit' alist each time a new one arrives, in the shell
+;; that received it, for example to warn when the 5-hour window passes
+;; 80 percent:
 ;;
 ;;   (add-hook 'agent-shell-usage-limits-update-functions
 ;;             (lambda (_rate-limit)
@@ -85,14 +101,14 @@
 ;;
 ;; Limitations:
 ;;
-;; - The values belong to the account, so one set is kept for all shells.
-;;   Shells connected with different Claude accounts (agent configs that
-;;   set CLAUDE_CONFIG_DIR) overwrite each other's values.
 ;; - Only Claude Code is supported.  Other agents do not report usage
 ;;   limits over ACP yet.
+;; - Accounts are told apart by config directory only.  Two directories
+;;   logged into the same account count as two accounts.
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'map)
 (require 'seq)
 (require 'subr-x)
@@ -101,8 +117,11 @@
 (declare-function agent-shell-subscribe-to "agent-shell")
 (declare-function agent-shell-unsubscribe "agent-shell")
 (declare-function agent-shell-get-config "agent-shell")
+(declare-function agent-shell-anthropic-make-claude-code-config "agent-shell-anthropic")
+(declare-function agent-shell-anthropic-make-claude-client "agent-shell-anthropic")
 (defvar agent-shell-mode-hook)
 (defvar agent-shell--state)
+(defvar agent-shell-anthropic-claude-environment)
 
 (defgroup agent-shell-usage-limits nil
   "Show Claude Code usage limits in agent-shell mode lines."
@@ -310,6 +329,37 @@ directory, such as \"~/.claude-work\"."
 (defun agent-shell-usage-limits-account-list ()
   "Return the accounts that values have been received for, sorted."
   (sort (mapcar #'car agent-shell-usage-limits-accounts) #'string<))
+
+(cl-defun agent-shell-usage-limits-make-claude-code-config (&key name config-dir)
+  "Return a Claude Code agent config for the account in CONFIG-DIR.
+The config is agent-shell's own Claude Code config with its buffer and
+mode line names set to NAME and CLAUDE_CONFIG_DIR set to CONFIG-DIR for
+the agent it starts, so shells made from it use that account.  Add it
+to `agent-shell-agent-configs' as a function, for example:
+
+  (add-to-list \\='agent-shell-agent-configs
+               (lambda ()
+                 (agent-shell-usage-limits-make-claude-code-config
+                  :name \"Claude (work)\" :config-dir \"~/.claude-work\")))
+
+The identifier stays `claude-code', so the config is watched like the
+original.  Claude Code must be logged in for CONFIG-DIR: on macOS the
+login lives in the Keychain, one entry per config directory, so run
+CLAUDE_CONFIG_DIR=<dir> claude auth login once."
+  (unless (and name config-dir)
+    (error "Both :name and :config-dir are required"))
+  (let ((config (agent-shell-anthropic-make-claude-code-config))
+        (variable (concat "CLAUDE_CONFIG_DIR=" (expand-file-name config-dir))))
+    (setf (alist-get :buffer-name config) name
+          (alist-get :mode-line-name config) name
+          (alist-get :client-maker config)
+          (lambda (buffer)
+            ;; The client maker reads the variables from this customizable
+            ;; variable when it starts the agent; bind it for this account.
+            (let ((agent-shell-anthropic-claude-environment
+                   (cons variable agent-shell-anthropic-claude-environment)))
+              (agent-shell-anthropic-make-claude-client :buffer buffer))))
+    config))
 
 (defun agent-shell-usage-limits--store (account rate-limit time)
   "Store RATE-LIMIT as received for ACCOUNT at TIME.
