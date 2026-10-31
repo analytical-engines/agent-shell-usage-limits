@@ -180,6 +180,8 @@ account's open shells.  The table refreshes as updates arrive, =g=
 refreshes it by hand and =RET= switches to a shell of the account on the
 line.
 
+[[file:screenshots/list.png]]
+
 Accounts are labelled with their directory.  To label them yourself:
 
 #+begin_src emacs-lisp
