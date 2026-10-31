@@ -172,7 +172,9 @@ The values belong to a Claude account, and the package keeps one set per
 account.  A shell's account is the Claude Code config directory its agent
 runs with: =CLAUDE_CONFIG_DIR=, or =~/.claude= when it is not set.  A
 shell's mode line and details show its own account only; the details end
-with a count of the other accounts.
+with a count of the other accounts:
+
+[[file:screenshots/popover-accounts.png]]
 
 =M-x agent-shell-usage-limits-list= shows every account in a table, one
 row each, with a column per window, the time of the last update and the
